@@ -187,6 +187,10 @@ export const DEFAULT_APP_KEYBINDINGS: AppDefaultKeybindings = [
     all: ["mainSurface", "promptAvailable"],
     none: ["modalOpen", "terminalFocus", "browserFocus"],
   }),
+  binding("voice.toggle", "r", { alt: true }, {
+    all: ["mainSurface", "promptAvailable"],
+    none: ["modalOpen", "terminalFocus", "browserFocus"],
+  }),
   binding("modelPicker.toggle", "m", { mod: true, shift: true }, {
     all: ["mainSurface", "promptAvailable"],
     none: ["modalOpen", "terminalFocus", "browserFocus"],
@@ -199,8 +203,8 @@ export const DEFAULT_APP_KEYBINDINGS: AppDefaultKeybindings = [
     none: [],
   }),
   // Rotate the composer's model and reasoning level without opening the picker,
-  // scoped exactly like `modelPicker.toggle` above. Alt is otherwise unused by
-  // bb, the browser, and both desktop menus, so these chords shadow nothing.
+  // scoped exactly like `modelPicker.toggle` above. These plain-Alt chords are
+  // reserved here so they shadow no browser or desktop-menu accelerators.
   // macOS composes Option+<letter> into another character, so they match on the
   // physical key — see `normalizeAppShortcutInputKey` in @bb/domain.
   binding("modelPicker.cycleModel", "m", { alt: true }, {

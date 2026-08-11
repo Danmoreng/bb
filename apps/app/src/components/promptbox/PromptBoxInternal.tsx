@@ -36,6 +36,7 @@ import {
 } from "@/components/promptbox/mentions/types";
 import { AppCommandShortcutHint } from "@/components/commands/AppCommandShortcutHint";
 import {
+  useAppCommandHandler,
   useAppCommandKeyDispatch,
   useAppCommandShortcut,
 } from "@/components/commands/AppCommandProvider";
@@ -70,6 +71,7 @@ import {
   type PluginMentionTrigger,
 } from "@/lib/plugin-mention-triggers";
 import { useRichTextEditingPreference } from "@/lib/rich-text-editing-preference";
+import { useOptionalPaneContext } from "@/views/thread-detail/PaneContext";
 import {
   arePromptDraftStatesEqual,
   isPromptDraftEmpty,
@@ -2390,6 +2392,52 @@ export function PromptBoxInternal({
   const showStop = Boolean(isRunning && onStop && !canSubmit && !isVoiceBusy);
   const canStartVoiceInput =
     voice !== undefined && voice.isSupported && !isSubmitting;
+  // PromptBoxInternal is also used by retained secondary composers. Scope the
+  // command to the focused pane's primary composer: pane focus can change
+  // without moving DOM focus, and recording can blur the editor entirely.
+  const isFocusedPane = useOptionalPaneContext()?.isFocused ?? true;
+  const voiceOwnsTargetlessCommand =
+    voice?.state === "recording" || voice?.state === "transcribing";
+  useAppCommandHandler(
+    "voice.toggle",
+    ({ target }) => {
+      const composerElement = formRef.current?.closest("[data-app-composer]");
+      const isPrimaryComposer =
+        composerElement?.getAttribute("data-app-composer-role") !== "secondary";
+      const targetComposer =
+        target instanceof HTMLElement
+          ? target.closest("[data-app-composer]")
+          : null;
+
+      if (targetComposer !== null) {
+        if (targetComposer !== composerElement) return false;
+        // Own the configured Alt chord even when this stale pane cannot act, so
+        // macOS does not insert Option+R's composed character into its editor.
+        if (!isFocusedPane) return true;
+      } else {
+        // For body/native-menu dispatches, an active recording/transcription
+        // retains ownership; otherwise use the focused pane's primary composer.
+        if (
+          !isFocusedPane ||
+          (!isPrimaryComposer && !voiceOwnsTargetlessCommand)
+        ) {
+          return false;
+        }
+      }
+
+      // Starting requires available voice input and an idle submit path. An
+      // existing recording/transcription must remain stoppable while submitting.
+      if (voice?.state === "recording") {
+        voice.stop();
+      } else if (voice?.state === "transcribing") {
+        voice.cancel();
+      } else if (canStartVoiceInput) {
+        void voice.start();
+      }
+      return true;
+    },
+    voiceOwnsTargetlessCommand ? 100 : 0,
+  );
   const showVoiceAsPrimaryAction =
     isPointerCoarse && !hasSubmittableInput && canStartVoiceInput;
   const handleVoicePointerDown = useCallback(

@@ -156,6 +156,11 @@ export const APP_COMMAND_GROUPS: readonly AppCommandGroup[] = [
         "Focus the active composer's input and move the caret to the end.",
       ),
       command(
+        "voice.toggle",
+        "Toggle voice dictation",
+        "Start, stop, or cancel voice dictation in the focused composer.",
+      ),
+      command(
         "modelPicker.toggle",
         "Toggle model picker",
         "Open or close the focused composer's model picker.",

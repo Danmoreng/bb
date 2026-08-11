@@ -152,8 +152,8 @@ describe("app keybindings", () => {
         },
       });
       // The cycle chords must stay on plain Alt and share the scope of
-      // `modelPicker.toggle`. Alt is unused elsewhere in bb, so nothing shadows
-      // them and they shadow nothing.
+      // `modelPicker.toggle`. Alt+R is reserved for voice dictation, so these
+      // chords must remain distinct from every other plain-Alt binding.
       expect(
         assignedDefaultKeybindings
           .filter((binding) => binding.command.startsWith("modelPicker.cycle"))
@@ -220,18 +220,30 @@ describe("app keybindings", () => {
           when: { all: ["mainSurface", "modelPickerOpen"], none: [] },
         },
       ]);
-      // No other default binding may use Alt, so the cycle chords cannot be
-      // shadowed by an earlier binding for the same chord.
+      // Alt+R is reserved for voice dictation; the model-cycle chords remain
+      // distinct and cannot be shadowed by an earlier binding for the same key.
       expect(
         assignedDefaultKeybindings
           .filter((binding) => binding.shortcut.alt)
           .map((binding) => binding.command),
       ).toEqual([
+        "voice.toggle",
         "modelPicker.cycleModel",
         "modelPicker.cycleReasoning",
         "modelPicker.cycleModel",
         "modelPicker.cycleReasoning",
       ]);
+      expect(
+        assignedDefaultKeybindings.find(
+          (binding) => binding.command === "voice.toggle",
+        ),
+      ).toMatchObject({
+        shortcut: { key: "r", alt: true },
+        when: {
+          all: ["mainSurface", "promptAvailable"],
+          none: ["modalOpen", "terminalFocus", "browserFocus"],
+        },
+      });
       expect(
         assignedDefaultKeybindings
           .filter((binding) => binding.command.startsWith("pane."))
