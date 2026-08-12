@@ -57,7 +57,7 @@ describe("CP-102 schema migrations", () => {
           }
           return row.id;
         }),
-    ).toEqual([0, 1, 2, 3]);
+    ).toEqual([0, 1, 2, 3, 4]);
     expect(names(db, "table")).toEqual(
       expect.arrayContaining([...controlPlaneSchemaManifest.tables]),
     );
@@ -69,7 +69,7 @@ describe("CP-102 schema migrations", () => {
     );
   });
 
-  it.each([1, 2, 3, 4])(
+  it.each([1, 2, 3, 4, 5])(
     "supports a valid migration prefix %s and deterministic upgrade",
     (prefix) => {
       const { db } = initialize(prefix);
@@ -77,11 +77,11 @@ describe("CP-102 schema migrations", () => {
       hostMigrateToFull(db);
       expect(
         db.prepare("SELECT count(*) AS count FROM _bb_migrations").get(),
-      ).toEqual({ count: 4 });
+      ).toEqual({ count: 5 });
       hostMigrateToFull(db);
       expect(
         db.prepare("SELECT count(*) AS count FROM _bb_migrations").get(),
-      ).toEqual({ count: 4 });
+      ).toEqual({ count: 5 });
     },
   );
 
@@ -101,7 +101,7 @@ describe("CP-102 schema migrations", () => {
     ).toBeUndefined();
     expect(
       db.prepare("SELECT max(id) AS id FROM _bb_migrations").get(),
-    ).toEqual({ id: 3 });
+    ).toEqual({ id: 4 });
   });
 
   it("rejects invalid states and cross-project references", () => {

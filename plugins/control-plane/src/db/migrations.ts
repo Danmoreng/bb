@@ -430,6 +430,20 @@ export const controlPlaneMigrations: readonly string[] = [
     );
     CREATE INDEX outbox_delivery ON outbox(status, next_attempt_at, lease_until);
   `,
+  `
+    CREATE TABLE domain_events (
+      id TEXT PRIMARY KEY,
+      event_type TEXT NOT NULL,
+      event_version INTEGER NOT NULL CHECK (event_version >= 1),
+      aggregate_type TEXT NOT NULL,
+      aggregate_id TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      correlation_id TEXT NOT NULL,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      occurred_at INTEGER NOT NULL
+    );
+    CREATE INDEX domain_events_aggregate ON domain_events(aggregate_type, aggregate_id, occurred_at, id);
+  `,
 ] as const;
 
 export function initializeControlPlaneDatabase(

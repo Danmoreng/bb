@@ -34,7 +34,7 @@ describe("control-plane production scaffold", () => {
     expect(reloadedDb.pragma("foreign_keys", { simple: true })).toBe(1);
     expect(
       reloadedDb.prepare("SELECT count(*) AS count FROM _bb_migrations").get(),
-    ).toEqual({ count: 4 });
+    ).toEqual({ count: 5 });
     await reloaded.harness.dispose();
   });
 });

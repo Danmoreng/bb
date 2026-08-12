@@ -1,7 +1,7 @@
 /** The published CP-102 schema surface. Migration SQL is the source of truth;
  * this manifest is intentionally only a reviewable inventory used by tests and
  * diagnostics. Keep names stable after a migration is released. */
-export const CONTROL_PLANE_SCHEMA_VERSION = 4;
+export const CONTROL_PLANE_SCHEMA_VERSION = 5;
 
 export const controlPlaneSchemaManifest = {
   tables: [
@@ -28,6 +28,7 @@ export const controlPlaneSchemaManifest = {
     "review_requests",
     "review_findings",
     "outbox",
+    "domain_events",
     "processed_events",
   ],
   indexes: [
@@ -50,6 +51,7 @@ export const controlPlaneSchemaManifest = {
     "review_requests_project_status",
     "review_findings_review",
     "outbox_delivery",
+    "domain_events_aggregate",
   ],
   triggers: [
     "decisions_immutable_content",
