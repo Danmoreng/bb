@@ -13,13 +13,20 @@ export type OutboxStatus =
   | "processing"
   | "delivered"
   | "failed"
-  | "dead-letter";
+  | "dead-letter"
+  | "outcome-unknown";
+export type OutboxDeliveryKind =
+  | "retryable"
+  | "reconcile-before-retry"
+  | "non-retryable";
 
 export interface ControlProjectRow {
   id: string;
   bb_project_id: string;
   tasks_project_id: string | null;
   status: ControlProjectStatus;
+  onboarding_version: number;
+  policy_version: number;
   version: number;
   created_at: number;
   updated_at: number;
@@ -34,10 +41,14 @@ export interface OutboxRow {
   payload_json: string;
   idempotency_key: string;
   status: OutboxStatus;
+  delivery_kind: OutboxDeliveryKind;
+  reconciliation_key: string | null;
   attempt_count: number;
   next_attempt_at: number;
   lease_until: number | null;
+  lease_token: string | null;
   last_error: string | null;
+  version: number;
   created_at: number;
   updated_at: number;
 }
