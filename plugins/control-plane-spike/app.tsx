@@ -1,13 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   definePluginApp,
+  ThreadChat,
   useBbContext,
   useRealtime,
   useRealtimeConnectionState,
   useRpc,
 } from "@bb/plugin-sdk/app";
 import type { SpikeSnapshot, TasksCapability } from "./src/contract.js";
-import { controlPlaneSpikeRpcContract } from "./src/contract.js";
+import type { z } from "zod";
+import {
+  controlPlaneSpikeRpcContract,
+  stewardStatusSchema,
+} from "./src/contract.js";
+
+type StewardStatus = z.infer<typeof stewardStatusSchema>;
 
 function payloadProjectId(payload: unknown): string | null | undefined {
   if (typeof payload !== "object" || payload === null || Array.isArray(payload))
@@ -26,6 +33,7 @@ function ControlPlanePanel() {
   const [snapshot, setSnapshot] = useState<SpikeSnapshot | null>(null);
   const [tasksCapability, setTasksCapability] =
     useState<TasksCapability | null>(null);
+  const [steward, setSteward] = useState<StewardStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const requestGeneration = useRef(0);
@@ -46,6 +54,12 @@ function ControlPlanePanel() {
       } catch {
         if (requestGeneration.current === generation) setTasksCapability(null);
       }
+      try {
+        const nextSteward = await rpc.call("stewardStatus", { projectId });
+        if (requestGeneration.current === generation) setSteward(nextSteward);
+      } catch {
+        if (requestGeneration.current === generation) setSteward(null);
+      }
     } catch (cause) {
       if (requestGeneration.current !== generation) return;
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -57,6 +71,7 @@ function ControlPlanePanel() {
   useEffect(() => {
     setSnapshot(null);
     setTasksCapability(null);
+    setSteward(null);
     void load();
     return () => {
       requestGeneration.current += 1;
@@ -142,6 +157,41 @@ function ControlPlanePanel() {
         <dt className="text-muted-foreground">Revision</dt>
         <dd aria-label="Snapshot revision">{snapshot.revision}</dd>
       </dl>
+      <div>
+        <h2 className="font-medium">Project Steward</h2>
+        {steward?.status === "ready" && steward.threadId ? (
+          <div className="mt-2 h-96 min-h-0 overflow-hidden rounded border">
+            <ThreadChat
+              threadId={steward.threadId}
+              variant="compact"
+              layout="contained"
+              permissionPolicy="editable"
+              className="h-full"
+            />
+          </div>
+        ) : (
+          <div className="mt-2 space-y-2">
+            <p className="text-sm text-muted-foreground">
+              {steward?.status === "missing"
+                ? "The saved Steward thread is unavailable."
+                : "Initialize a persistent Steward for this project."}
+            </p>
+            <button
+              className="rounded border px-3 py-1 text-sm"
+              type="button"
+              onClick={async () => {
+                if (!projectId) return;
+                await rpc.call("stewardEnsure", { projectId });
+                await load();
+              }}
+            >
+              {steward?.status === "missing"
+                ? "Repair Steward"
+                : "Initialize Steward"}
+            </button>
+          </div>
+        )}
+      </div>
       <div>
         <h2 className="font-medium">Tasks integration</h2>
         {tasksCapability ? (

@@ -58,6 +58,41 @@ describe("control-plane spike app", () => {
     expect(calls).toBe(2);
   });
 
+  it("renders the host-owned ThreadChat for a persistent Steward", async () => {
+    const slot = renderSlot(
+      app.navPanels[0]!,
+      { subPath: "" },
+      {
+        context: { projectId: "project-one" },
+        rpc: {
+          snapshot: () => ({
+            projectId: "project-one",
+            observationCount: 0,
+            lifecycleEvents: [],
+            revision: 1,
+            error: null,
+          }),
+          tasksCapability: () => ({
+            status: "unavailable",
+            pluginId: "tasks",
+            version: null,
+            expectedMethods: [],
+            verifiedMethods: [],
+            reason: "not configured",
+          }),
+          stewardStatus: () => ({
+            status: "ready",
+            threadId: "thr_steward",
+            error: null,
+          }),
+        },
+      },
+    );
+    expect(
+      await slot.findByText(/ThreadChat stub \(thr_steward\)/),
+    ).toBeTruthy();
+  });
+
   it("ignores stale realtime responses and refetches after reconnect", async () => {
     const resolvers: Array<
       (snapshot: {

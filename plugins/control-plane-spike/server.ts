@@ -175,6 +175,11 @@ export default async function plugin(bb: BbPluginApi) {
       parent_thread_id TEXT,
       created_at INTEGER NOT NULL
     )`,
+    `CREATE TABLE IF NOT EXISTS spike_stewards (
+      project_id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`,
   ]);
 
   let receiptSequence = 0;
@@ -261,6 +266,67 @@ export default async function plugin(bb: BbPluginApi) {
       revision,
       error: `Project ${projectId} is not configured for this capability spike: ${reason}`,
     };
+  }
+
+  async function stewardStatus(projectId: string | null) {
+    if (!projectId) {
+      return {
+        status: "uninitialized" as const,
+        threadId: null,
+        error: "Select a project first.",
+      };
+    }
+    const row = db
+      .prepare("SELECT thread_id FROM spike_stewards WHERE project_id = ?")
+      .get(projectId);
+    const parsedRow = z.object({ thread_id: z.string().min(1) }).safeParse(row);
+    if (!parsedRow.success) {
+      return { status: "uninitialized" as const, threadId: null, error: null };
+    }
+    try {
+      const thread = z
+        .object({ id: z.string().min(1) })
+        .passthrough()
+        .parse(
+          await bb.sdk.threads.get({ threadId: parsedRow.data.thread_id }),
+        );
+      return { status: "ready" as const, threadId: thread.id, error: null };
+    } catch (error) {
+      return {
+        status: "missing" as const,
+        threadId: parsedRow.data.thread_id,
+        error:
+          error instanceof Error ? error.message : "Steward thread unavailable",
+      };
+    }
+  }
+
+  async function ensureSteward(projectId: string) {
+    if (projectId !== configuredProjectId) {
+      return {
+        status: "missing" as const,
+        threadId: null,
+        error: "Project is not configured for this spike.",
+      };
+    }
+    const current = await stewardStatus(projectId);
+    if (current.status === "ready") return current;
+    const thread = z
+      .object({ id: z.string().min(1) })
+      .passthrough()
+      .parse(
+        await bb.sdk.threads.spawn({
+          projectId,
+          prompt:
+            "You are the persistent Control Plane project steward. Help initialize and coordinate this project.",
+          title: "Project Steward",
+          environment: { type: "project-default" },
+        }),
+      );
+    db.prepare(
+      "INSERT OR REPLACE INTO spike_stewards (project_id, thread_id, updated_at) VALUES (?, ?, ?)",
+    ).run(projectId, thread.id, Date.now());
+    return { status: "ready" as const, threadId: thread.id, error: null };
   }
 
   function snapshot(projectId: string | null): SpikeSnapshot {
@@ -425,6 +491,8 @@ export default async function plugin(bb: BbPluginApi) {
     threadQueueList: (input) =>
       threadOperation(() => threadHost.queue.list(input)),
     threadStop: (input) => threadOperation(() => threadHost.stop(input)),
+    stewardStatus: (input) => stewardStatus(input.projectId),
+    stewardEnsure: (input) => ensureSteward(input.projectId),
   });
 
   bb.agents.registerTool({

@@ -135,6 +135,16 @@ const threadResultSchema = z
     data: z.unknown().optional(),
   })
   .strict();
+export const stewardStatusInputSchema = z
+  .object({ projectId: z.string().min(1).nullable() })
+  .strict();
+export const stewardStatusSchema = z
+  .object({
+    status: z.enum(["uninitialized", "ready", "missing"]),
+    threadId: z.string().min(1).nullable(),
+    error: z.string().nullable(),
+  })
+  .strict();
 
 export const controlPlaneSpikeRpcContract = defineRpcContract({
   snapshot: {
@@ -204,6 +214,14 @@ export const controlPlaneSpikeRpcContract = defineRpcContract({
   threadStop: {
     input: threadRefInputSchema,
     output: threadResultSchema,
+  },
+  stewardStatus: {
+    input: stewardStatusInputSchema,
+    output: stewardStatusSchema,
+  },
+  stewardEnsure: {
+    input: z.object({ projectId: z.string().min(1) }).strict(),
+    output: stewardStatusSchema,
   },
 });
 
