@@ -4,6 +4,7 @@ import {
   controlPlaneSpikeRpcContract,
   recordObservationInputSchema,
   type SpikeSnapshot,
+  stewardStatusSchema,
 } from "./src/contract.js";
 import {
   createTasksAdapter,
@@ -20,7 +21,17 @@ import {
 
 const TOOL_NAME = "cp_spike_record";
 const REALTIME_CHANNEL = "control-plane-spike-changed";
+const CONTEXT_REALTIME_CHANNEL = "control-plane-spike-context-changed";
 const MAX_EVENTS = 50;
+type StewardStatus = z.infer<typeof stewardStatusSchema>;
+
+const stewardThreadSchema = z
+  .object({
+    id: z.string().min(1),
+    projectId: z.string().min(1),
+    originPluginId: z.literal("control-plane-spike"),
+  })
+  .passthrough();
 const lifecycleEventRowSchema = z.object({ event_name: z.string() });
 const countRowSchema = z.object({ count: z.number() });
 
@@ -43,6 +54,38 @@ function publishChanged(
   bb.realtime.publish(REALTIME_CHANNEL, { projectId, revision });
 }
 
+const errorShapeSchema = z
+  .object({
+    code: z.string().nullable().optional(),
+    status: z.number().int().optional(),
+    body: z.unknown().optional(),
+    error: z.unknown().optional(),
+  })
+  .passthrough();
+
+function errorCode(error: unknown): string | null {
+  const parsed = errorShapeSchema.safeParse(error);
+  if (!parsed.success) return null;
+  if (parsed.data.code) return parsed.data.code;
+  const body = errorShapeSchema.safeParse(parsed.data.body);
+  if (body.success && body.data.code) return body.data.code;
+  const nested = errorShapeSchema.safeParse(
+    body.success ? body.data.error : parsed.data.error,
+  );
+  return nested.success && nested.data.code ? nested.data.code : null;
+}
+
+function errorStatus(error: unknown): number | null {
+  const parsed = errorShapeSchema.safeParse(error);
+  return parsed.success && parsed.data.status !== undefined
+    ? parsed.data.status
+    : null;
+}
+
+function isMissingThreadError(error: unknown): boolean {
+  return errorCode(error) === "thread_not_found";
+}
+
 export default async function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
     configuredProject: {
@@ -53,8 +96,14 @@ export default async function plugin(bb: BbPluginApi) {
   });
   const configured = await settings.get();
   let configuredProjectId = configured.configuredProject ?? null;
+  let configuredProjectRevision = 0;
+  const stewardEnsureInFlight = new Map<string, Promise<StewardStatus>>();
   settings.onChange((next) => {
-    configuredProjectId = next.configuredProject ?? null;
+    const nextProjectId = next.configuredProject ?? null;
+    if (nextProjectId === configuredProjectId) return;
+    configuredProjectId = nextProjectId;
+    configuredProjectRevision += 1;
+    bb.realtime.publish(CONTEXT_REALTIME_CHANNEL, { revision: Date.now() });
   });
 
   const tasksGateway = createTasksRpcGateway(bb.sdk);
@@ -268,53 +317,111 @@ export default async function plugin(bb: BbPluginApi) {
     };
   }
 
-  async function stewardStatus(projectId: string | null) {
-    if (!projectId) {
+  async function stewardStatus(
+    projectId: string | null,
+  ): Promise<StewardStatus> {
+    const configuredIdAtStart = configuredProjectId;
+    const configuredRevisionAtStart = configuredProjectRevision;
+    if (!projectId)
       return {
-        status: "uninitialized" as const,
+        status: "uninitialized",
         threadId: null,
         error: "Select a project first.",
       };
-    }
+    if (projectId !== configuredIdAtStart)
+      return {
+        status: "missing",
+        threadId: null,
+        error: "Project is not configured for this spike.",
+      };
     const row = db
       .prepare("SELECT thread_id FROM spike_stewards WHERE project_id = ?")
       .get(projectId);
     const parsedRow = z.object({ thread_id: z.string().min(1) }).safeParse(row);
-    if (!parsedRow.success) {
-      return { status: "uninitialized" as const, threadId: null, error: null };
-    }
+    if (!parsedRow.success)
+      return { status: "uninitialized", threadId: null, error: null };
     try {
-      const thread = z
-        .object({ id: z.string().min(1) })
-        .passthrough()
-        .parse(
-          await bb.sdk.threads.get({ threadId: parsedRow.data.thread_id }),
-        );
-      return { status: "ready" as const, threadId: thread.id, error: null };
+      const thread = stewardThreadSchema.parse(
+        await bb.sdk.threads.get({ threadId: parsedRow.data.thread_id }),
+      );
+      if (configuredProjectId !== configuredIdAtStart)
+        return {
+          status: "error",
+          threadId: null,
+          error: "Project configuration changed; retry.",
+        };
+      if (
+        thread.id !== parsedRow.data.thread_id ||
+        thread.projectId !== projectId ||
+        thread.originPluginId !== "control-plane-spike"
+      ) {
+        return {
+          status: "error",
+          threadId: null,
+          error: "The saved Steward identity could not be verified.",
+        };
+      }
+      return { status: "ready", threadId: thread.id, error: null };
     } catch (error) {
+      if (
+        configuredProjectId !== configuredIdAtStart ||
+        configuredProjectRevision !== configuredRevisionAtStart
+      ) {
+        return {
+          status: "error",
+          threadId: null,
+          error: "Project configuration changed; retry.",
+        };
+      }
+      if (isMissingThreadError(error))
+        return {
+          status: "missing",
+          threadId: parsedRow.data.thread_id,
+          error: "The saved Steward thread is unavailable.",
+        };
       return {
-        status: "missing" as const,
-        threadId: parsedRow.data.thread_id,
+        status: "error",
+        threadId: null,
         error:
-          error instanceof Error ? error.message : "Steward thread unavailable",
+          error instanceof Error ? error.message : "Steward lookup failed.",
       };
     }
   }
 
-  async function ensureSteward(projectId: string) {
-    if (projectId !== configuredProjectId) {
-      return {
-        status: "missing" as const,
-        threadId: null,
-        error: "Project is not configured for this spike.",
-      };
-    }
-    const current = await stewardStatus(projectId);
-    if (current.status === "ready") return current;
-    const thread = z
-      .object({ id: z.string().min(1) })
-      .passthrough()
-      .parse(
+  async function ensureSteward(projectId: string): Promise<StewardStatus> {
+    const existing = stewardEnsureInFlight.get(projectId);
+    if (existing) return existing;
+    const operation = (async (): Promise<StewardStatus> => {
+      const configuredIdAtStart = configuredProjectId;
+      const configuredRevisionAtStart = configuredProjectRevision;
+      if (projectId !== configuredIdAtStart)
+        return {
+          status: "error",
+          threadId: null,
+          error: "Project is not configured for this spike.",
+        };
+      const current = await stewardStatus(projectId);
+      if (
+        configuredProjectId !== configuredIdAtStart ||
+        configuredProjectRevision !== configuredRevisionAtStart
+      )
+        return {
+          status: "error",
+          threadId: null,
+          error: "Project configuration changed; retry.",
+        };
+      if (current.status === "ready" || current.status === "error")
+        return current;
+      if (
+        configuredProjectId !== configuredIdAtStart ||
+        configuredProjectRevision !== configuredRevisionAtStart
+      )
+        return {
+          status: "error",
+          threadId: null,
+          error: "Project configuration changed; retry.",
+        };
+      const thread = stewardThreadSchema.parse(
         await bb.sdk.threads.spawn({
           projectId,
           prompt:
@@ -323,10 +430,45 @@ export default async function plugin(bb: BbPluginApi) {
           environment: { type: "project-default" },
         }),
       );
-    db.prepare(
-      "INSERT OR REPLACE INTO spike_stewards (project_id, thread_id, updated_at) VALUES (?, ?, ?)",
-    ).run(projectId, thread.id, Date.now());
-    return { status: "ready" as const, threadId: thread.id, error: null };
+      const trustedThread =
+        thread.projectId === projectId &&
+        thread.originPluginId === "control-plane-spike";
+      if (!trustedThread) {
+        return {
+          status: "error",
+          threadId: null,
+          error: "The created Steward identity could not be verified.",
+        };
+      }
+      if (
+        configuredProjectId !== configuredIdAtStart ||
+        configuredProjectRevision !== configuredRevisionAtStart
+      ) {
+        try {
+          await bb.sdk.threads.archive({ threadId: thread.id });
+        } catch (error) {
+          bb.log.warn(
+            `Could not clean up stale Steward ${thread.id}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        return {
+          status: "error",
+          threadId: null,
+          error:
+            "Project configuration changed while creating the Steward; retry.",
+        };
+      }
+      db.prepare(
+        "INSERT OR REPLACE INTO spike_stewards (project_id, thread_id, updated_at) VALUES (?, ?, ?)",
+      ).run(projectId, thread.id, Date.now());
+      return { status: "ready", threadId: thread.id, error: null };
+    })();
+    stewardEnsureInFlight.set(projectId, operation);
+    try {
+      return await operation;
+    } finally {
+      stewardEnsureInFlight.delete(projectId);
+    }
   }
 
   function snapshot(projectId: string | null): SpikeSnapshot {
@@ -376,6 +518,62 @@ export default async function plugin(bb: BbPluginApi) {
     return snapshot(projectId);
   }
 
+  const projectContextProjectSchema = z
+    .object({ id: z.string().min(1), name: z.string().min(1) })
+    .passthrough();
+
+  async function projectContext() {
+    const requestedProjectId = configuredProjectId;
+    if (!requestedProjectId) {
+      return {
+        status: "unconfigured" as const,
+        configuredProject: null,
+        error: "Configure a project for this capability spike first.",
+      };
+    }
+    try {
+      const project = projectContextProjectSchema.parse(
+        await bb.sdk.projects.get({ projectId: requestedProjectId }),
+      );
+      if (project.id !== requestedProjectId) {
+        return {
+          status: "error" as const,
+          configuredProject: null,
+          error: "The project lookup returned a different project.",
+        };
+      }
+      if (configuredProjectId !== requestedProjectId) {
+        return {
+          status: "error" as const,
+          configuredProject: null,
+          error: "Project configuration changed while loading; retry.",
+        };
+      }
+      return {
+        status: "ready" as const,
+        configuredProject: { id: project.id, name: project.name },
+        error: null,
+      };
+    } catch (error) {
+      if (configuredProjectId !== requestedProjectId) {
+        return {
+          status: "error" as const,
+          configuredProject: null,
+          error: "Project configuration changed while loading; retry.",
+        };
+      }
+      const status = errorStatus(error);
+      return {
+        status: status === 404 ? ("missing" as const) : ("error" as const),
+        configuredProject: null,
+        error:
+          error instanceof Error
+            ? error.message
+            : "The configured project could not be loaded.",
+      };
+    }
+  }
+
   function taskError(error: unknown): { code: string; message: string } {
     if (error instanceof TasksDomainError) {
       return { code: error.code, message: error.message };
@@ -410,6 +608,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   bb.rpc.register(controlPlaneSpikeRpcContract, {
+    projectContext,
     snapshot({ projectId }) {
       return snapshot(projectId);
     },

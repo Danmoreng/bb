@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFakePluginHost } from "@bb/plugin-sdk/testing";
 import type { FakeSdkOverrides } from "@bb/plugin-sdk/testing";
 import type { BbPluginApi } from "@bb/plugin-sdk";
@@ -60,6 +60,445 @@ async function load(
 }
 
 describe("control-plane capability spike", () => {
+  it("rejects extra project-context input at the RPC boundary", async () => {
+    const host = await load({ configuredProject: project.id });
+    await expect(
+      host.harness.callRpc("projectContext", { projectId: project.id }),
+    ).rejects.toThrow();
+  });
+
+  it("resolves the configured project context at the server boundary", async () => {
+    const host = await load(
+      { configuredProject: project.id },
+      {
+        projects: {
+          get: async ({ projectId }) => ({
+            id: projectId,
+            name: project.name,
+            kind: project.kind,
+            gitRemoteUrl: project.gitRemoteUrl,
+          }),
+        },
+      },
+    );
+    await expect(host.harness.callRpc("projectContext", {})).resolves.toEqual({
+      status: "ready",
+      configuredProject: { id: project.id, name: project.name },
+      error: null,
+    });
+
+    const unconfigured = await load();
+    await expect(
+      unconfigured.harness.callRpc("projectContext", {}),
+    ).resolves.toMatchObject({
+      status: "unconfigured",
+      configuredProject: null,
+    });
+  });
+
+  it("reports missing configured projects without exposing unrelated data", async () => {
+    const host = await load(
+      { configuredProject: project.id },
+      {
+        projects: {
+          get: async () => {
+            const error = new Error("project not found");
+            Object.assign(error, { status: 404 });
+            throw error;
+          },
+        },
+      },
+    );
+    await expect(host.harness.callRpc("projectContext", {})).resolves.toEqual({
+      status: "missing",
+      configuredProject: null,
+      error: "project not found",
+    });
+  });
+
+  it("rejects a project lookup that returns a different project", async () => {
+    const host = await load(
+      { configuredProject: project.id },
+      {
+        projects: {
+          get: async () => ({
+            id: otherProject.id,
+            name: otherProject.name,
+            kind: otherProject.kind,
+            gitRemoteUrl: otherProject.gitRemoteUrl,
+          }),
+        },
+      },
+    );
+    await expect(host.harness.callRpc("projectContext", {})).resolves.toEqual({
+      status: "error",
+      configuredProject: null,
+      error: "The project lookup returned a different project.",
+    });
+  });
+
+  it("does not publish a stale project when settings change during lookup", async () => {
+    let resolveLookup: ((value: typeof project) => void) | undefined;
+    const host = await load(
+      { configuredProject: project.id },
+      {
+        projects: {
+          get: () =>
+            new Promise((resolve) => {
+              resolveLookup = resolve;
+            }),
+        },
+      },
+    );
+    const contextPromise = host.harness.callRpc("projectContext", {});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await host.harness.setSettings({ configuredProject: otherProject.id });
+    resolveLookup?.(project);
+    await expect(contextPromise).resolves.toEqual({
+      status: "error",
+      configuredProject: null,
+      error: "Project configuration changed while loading; retry.",
+    });
+  });
+
+  it("does not query an old Steward scope after configuration changes", async () => {
+    let threadLookups = 0;
+    const host = await load(
+      { configuredProject: project.id },
+      {
+        threads: {
+          get: async () => {
+            threadLookups += 1;
+            return { id: "thr_old", projectId: project.id };
+          },
+        },
+      },
+    );
+    await host.harness.setSettings({ configuredProject: otherProject.id });
+    await expect(
+      host.harness.callRpc("stewardStatus", { projectId: project.id }),
+    ).resolves.toEqual({
+      status: "missing",
+      threadId: null,
+      error: "Project is not configured for this spike.",
+    });
+    expect(threadLookups).toBe(0);
+  });
+
+  it("publishes a context invalidation when the configured project changes", async () => {
+    const host = await load({ configuredProject: project.id });
+    await host.harness.setSettings({ configuredProject: otherProject.id });
+    expect(host.harness.realtimeSignals).toContainEqual({
+      channel: "control-plane-spike-context-changed",
+      payload: expect.objectContaining({ revision: expect.any(Number) }),
+    });
+  });
+
+  it("fails closed when a Steward response has the wrong identity or scope", async () => {
+    let returnedThread = {
+      id: "thr_steward",
+      projectId: project.id,
+      originPluginId: "control-plane-spike",
+    };
+    const host = await load(
+      { configuredProject: project.id },
+      {
+        threads: {
+          spawn: async () => returnedThread,
+          get: async () => returnedThread,
+        },
+      },
+    );
+    await expect(
+      host.harness.callRpc("stewardEnsure", { projectId: project.id }),
+    ).resolves.toMatchObject({ status: "ready", threadId: "thr_steward" });
+
+    returnedThread = {
+      id: "thr_other",
+      projectId: otherProject.id,
+      originPluginId: "other-plugin",
+    };
+    await expect(
+      host.harness.callRpc("stewardStatus", { projectId: project.id }),
+    ).resolves.toMatchObject({
+      status: "error",
+      threadId: null,
+      error: expect.any(String),
+    });
+  });
+
+  it("rejects a Steward spawn response outside the configured scope", async () => {
+    const host = await load(
+      { configuredProject: project.id },
+      {
+        threads: {
+          spawn: async () => ({
+            id: "thr_wrong",
+            projectId: otherProject.id,
+            originPluginId: "control-plane-spike",
+          }),
+        },
+      },
+    );
+    await expect(
+      host.harness.callRpc("stewardEnsure", { projectId: project.id }),
+    ).resolves.toEqual({
+      status: "error",
+      threadId: null,
+      error: "The created Steward identity could not be verified.",
+    });
+  });
+
+  it("coalesces concurrent Steward initialization", async () => {
+    let spawnCalls = 0;
+    let releaseSpawn: (value: {
+      id: string;
+      projectId: string;
+      originPluginId: "control-plane-spike";
+    }) => void = () => {};
+    const spawnResult = new Promise<{
+      id: string;
+      projectId: string;
+      originPluginId: "control-plane-spike";
+    }>((resolve) => {
+      releaseSpawn = resolve;
+    });
+    const host = await load(
+      { configuredProject: project.id },
+      {
+        threads: {
+          spawn: async () => {
+            spawnCalls += 1;
+            return spawnResult;
+          },
+        },
+      },
+    );
+    const first = host.harness.callRpc("stewardEnsure", {
+      projectId: project.id,
+    });
+    const second = host.harness.callRpc("stewardEnsure", {
+      projectId: project.id,
+    });
+    await vi.waitFor(() => expect(spawnCalls).toBe(1));
+    releaseSpawn({
+      id: "thr_coalesced",
+      projectId: project.id,
+      originPluginId: "control-plane-spike",
+    });
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { status: "ready", threadId: "thr_coalesced", error: null },
+      { status: "ready", threadId: "thr_coalesced", error: null },
+    ]);
+  });
+
+  it("repairs only an explicitly missing Steward thread", async () => {
+    let spawnCalls = 0;
+    const host = await load(
+      { configuredProject: project.id },
+      {
+        threads: {
+          get: async () => {
+            throw Object.assign(new Error("missing"), {
+              status: 404,
+              code: "thread_not_found",
+            });
+          },
+          spawn: async () => {
+            spawnCalls += 1;
+            return {
+              id: "thr_repaired",
+              projectId: project.id,
+              originPluginId: "control-plane-spike",
+            };
+          },
+        },
+      },
+    );
+    host.bb.storage
+      .database()
+      .prepare(
+        "INSERT INTO spike_stewards (project_id, thread_id, updated_at) VALUES (?, ?, ?)",
+      )
+      .run(project.id, "thr_missing", Date.now());
+    await expect(
+      host.harness.callRpc("stewardEnsure", { projectId: project.id }),
+    ).resolves.toMatchObject({ status: "ready", threadId: "thr_repaired" });
+    expect(spawnCalls).toBe(1);
+  });
+
+  it("does not repair after an unclassified 404 lookup failure", async () => {
+    let spawnCalls = 0;
+    const host = await load(
+      { configuredProject: project.id },
+      {
+        threads: {
+          get: async () => {
+            throw Object.assign(new Error("not found"), { status: 404 });
+          },
+          spawn: async () => {
+            spawnCalls += 1;
+            return {
+              id: "thr_unexpected",
+              projectId: project.id,
+              originPluginId: "control-plane-spike",
+            };
+          },
+        },
+      },
+    );
+    host.bb.storage
+      .database()
+      .prepare(
+        "INSERT INTO spike_stewards (project_id, thread_id, updated_at) VALUES (?, ?, ?)",
+      )
+      .run(project.id, "thr_existing", Date.now());
+    await expect(
+      host.harness.callRpc("stewardEnsure", { projectId: project.id }),
+    ).resolves.toMatchObject({ status: "error" });
+    expect(spawnCalls).toBe(0);
+  });
+
+  it("does not spawn after configuration changes during a missing lookup", async () => {
+    let host: ReturnType<typeof createFakePluginHost>;
+    let spawnCalls = 0;
+    host = await load(
+      { configuredProject: project.id },
+      {
+        threads: {
+          get: async () => {
+            await host.harness.setSettings({
+              configuredProject: otherProject.id,
+            });
+            throw Object.assign(new Error("missing"), {
+              code: "thread_not_found",
+              status: 404,
+            });
+          },
+          spawn: async () => {
+            spawnCalls += 1;
+            return {
+              id: "thr_stale",
+              projectId: project.id,
+              originPluginId: "control-plane-spike",
+            };
+          },
+        },
+      },
+    );
+    host.bb.storage
+      .database()
+      .prepare(
+        "INSERT INTO spike_stewards (project_id, thread_id, updated_at) VALUES (?, ?, ?)",
+      )
+      .run(project.id, "thr_missing", Date.now());
+    await expect(
+      host.harness.callRpc("stewardEnsure", { projectId: project.id }),
+    ).resolves.toMatchObject({ status: "error" });
+    expect(spawnCalls).toBe(0);
+  });
+
+  it("archives a trusted spawn that becomes stale during configuration change", async () => {
+    let releaseSpawn:
+      | ((value: {
+          id: string;
+          projectId: string;
+          originPluginId: "control-plane-spike";
+        }) => void)
+      | undefined;
+    let host: ReturnType<typeof createFakePluginHost>;
+    const spawnResult = new Promise<{
+      id: string;
+      projectId: string;
+      originPluginId: "control-plane-spike";
+    }>((resolve) => {
+      releaseSpawn = resolve;
+    });
+    host = await load(
+      { configuredProject: project.id },
+      {
+        threads: {
+          spawn: async () => spawnResult,
+          archive: async () => ({ ok: true }),
+        },
+      },
+    );
+    const ensure = host.harness.callRpc("stewardEnsure", {
+      projectId: project.id,
+    });
+    await vi.waitFor(() =>
+      expect(host.harness.sdk.callsTo("threads.spawn")).toHaveLength(1),
+    );
+    await host.harness.setSettings({ configuredProject: otherProject.id });
+    releaseSpawn?.({
+      id: "thr_stale",
+      projectId: project.id,
+      originPluginId: "control-plane-spike",
+    });
+    await expect(ensure).resolves.toMatchObject({ status: "error" });
+    expect(host.harness.sdk.callsTo("threads.archive")).toEqual([
+      [{ threadId: "thr_stale" }],
+    ]);
+  });
+
+  it("does not archive an untrusted spawn response", async () => {
+    const host = await load(
+      { configuredProject: project.id },
+      {
+        threads: {
+          spawn: async () => ({
+            id: "thr_wrong",
+            projectId: otherProject.id,
+            originPluginId: "control-plane-spike",
+          }),
+          archive: async () => ({ ok: true }),
+        },
+      },
+    );
+    await expect(
+      host.harness.callRpc("stewardEnsure", { projectId: project.id }),
+    ).resolves.toMatchObject({ status: "error" });
+    expect(host.harness.sdk.callsTo("threads.archive")).toHaveLength(0);
+  });
+
+  it("does not repair a Steward after a transient lookup failure", async () => {
+    let spawnCalls = 0;
+    const transient = Object.assign(new Error("temporary failure"), {
+      status: 503,
+    });
+    const host = await load(
+      { configuredProject: project.id },
+      {
+        threads: {
+          get: async () => {
+            throw transient;
+          },
+          spawn: async () => {
+            spawnCalls += 1;
+            return {
+              id: "thr_unexpected",
+              projectId: project.id,
+              originPluginId: "control-plane-spike",
+            };
+          },
+        },
+      },
+    );
+    host.bb.storage
+      .database()
+      .prepare(
+        "INSERT INTO spike_stewards (project_id, thread_id, updated_at) VALUES (?, ?, ?)",
+      )
+      .run(project.id, "thr_existing", Date.now());
+    await expect(
+      host.harness.callRpc("stewardStatus", { projectId: project.id }),
+    ).resolves.toMatchObject({ status: "error" });
+    await expect(
+      host.harness.callRpc("stewardEnsure", { projectId: project.id }),
+    ).resolves.toMatchObject({ status: "error" });
+    expect(spawnCalls).toBe(0);
+  });
+
   it("persists observations across reload and emits realtime signals", async () => {
     const host = await load({ configuredProject: project.id });
     expect(

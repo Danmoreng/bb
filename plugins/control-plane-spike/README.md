@@ -38,10 +38,15 @@ bb plugin reload control-plane-spike
 ```
 
 Select a project in Settings under **Capability spike project**. The tool is
-only included in new/resumed agent configurations for that project. Disable or
-reload the plugin and verify that the persisted observation count remains after
-re-enable and that no heartbeat service remains. The nav panel should show a
-clear degraded/error state if the backend is unavailable.
+only included in new/resumed agent configurations for that project. The nav
+panel is a global plugin route, so it does not receive BB's route project
+context. It loads the configured project from the server and displays the
+active project explicitly; a project route, when opened, is used only when it
+matches that configured project. Missing or invalid configuration is shown as
+an explicit empty/error state rather than silently reading another project.
+Disable or reload the plugin and verify that the persisted observation count
+remains after re-enable and that no heartbeat service remains. The nav panel
+should show a clear degraded/error state if the backend is unavailable.
 
 ## Fit / gap findings
 
@@ -49,17 +54,18 @@ The following table records what this disposable spike actually verifies. Unit
 and fake-host tests prove the plugin boundary and lifecycle wiring; they do not
 replace a running bb integration test.
 
-| Surface                      | Current fit                                                                                                 | Concrete fallback / limitation                                                                                               | Carry forward |
-| ---------------------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ------------- |
-| Storage and migrations       | Own SQLite database, append-only migrations, and reload persistence work in fake-host tests.                | Keep canonical Control-Plane state in the plugin database; never read `bb.db` or another plugin database.                    | Yes           |
-| RPC                          | Strict input/output schemas and project-scope checks are verified.                                          | Return a degraded/unauthorized snapshot instead of reading another project; application services must remain the next layer. | Yes           |
-| Realtime                     | Signals carry project/revision only and trigger a canonical refetch. Reconnect also refetches.              | Signals are ephemeral; stale responses are ignored and a later refetch remains authoritative.                                | Yes           |
-| Background service           | Abort-sensitive service registration and host-dispose cancellation are tested.                              | Use host-managed restart/backoff in production; no untracked timers or workers.                                              | Yes           |
-| Agent tools                  | Tool selection is project-scoped and the actor project comes only from tool context.                        | Configuration applies at session start/resume, not midway through an active provider turn.                                   | Yes           |
-| Instructions                 | Dynamic instructions are project-scoped through the public provider.                                        | Keep product policy server/application-owned in the production plugin; do not use instructions as authorization.             | Yes           |
-| Thread lifecycle             | Public coarse lifecycle listeners can persist events for the configured project.                            | No provider turn/tool stream; use reconciliation or budgeted polling until a later capability spike proves a better hook.    | Yes           |
-| Nav panel                    | Sanctioned panel renders loading, empty, error, degraded, and ready states.                                 | No contribution to another plugin's UI; use an independent cockpit.                                                          | Yes           |
-| Reload / disable / reconnect | Persistence, host disposal cleanup, frontend reconnect refetch, and real Steward reload lookup are covered. | A real backend restart walkthrough remains manual; provider-session execution is not claimed.                                | Yes           |
+| Surface                      | Current fit                                                                                                 | Concrete fallback / limitation                                                                                                             | Carry forward |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------- |
+| Storage and migrations       | Own SQLite database, append-only migrations, and reload persistence work in fake-host tests.                | Keep canonical Control-Plane state in the plugin database; never read `bb.db` or another plugin database.                                  | Yes           |
+| RPC                          | Strict input/output schemas and project-scope checks are verified.                                          | Return a degraded/unauthorized snapshot instead of reading another project; application services must remain the next layer.               | Yes           |
+| Realtime                     | Signals carry project/revision only and trigger a canonical refetch. Reconnect also refetches.              | Signals are ephemeral; stale responses are ignored and a later refetch remains authoritative.                                              | Yes           |
+| Background service           | Abort-sensitive service registration and host-dispose cancellation are tested.                              | Use host-managed restart/backoff in production; no untracked timers or workers.                                                            | Yes           |
+| Agent tools                  | Tool selection is project-scoped and the actor project comes only from tool context.                        | Configuration applies at session start/resume, not midway through an active provider turn.                                                 | Yes           |
+| Instructions                 | Dynamic instructions are project-scoped through the public provider.                                        | Keep product policy server/application-owned in the production plugin; do not use instructions as authorization.                           | Yes           |
+| Thread lifecycle             | Public coarse lifecycle listeners can persist events for the configured project.                            | No provider turn/tool stream; use lifecycle invalidation plus explicit reconciliation until a later capability spike proves a better hook. | Yes           |
+| Nav panel                    | Sanctioned panel renders loading, empty, error, degraded, and ready states.                                 | No contribution to another plugin's UI; use an independent cockpit.                                                                        | Yes           |
+| Reload / disable / reconnect | Persistence, host disposal cleanup, frontend reconnect refetch, and real Steward reload lookup are covered. | A real backend restart walkthrough remains manual; provider-session execution is not claimed.                                              | Yes           |
+| Global project context       | The nav panel resolves the server-configured project and displays its name even on the global plugin route. | Settings changes publish a dedicated WebSocket-backed plugin realtime invalidation; reconnects trigger one authoritative refetch.          | Yes           |
 
 CP-003 and CP-004 now expose contract-tested Tasks and Thread SDK routes.
 CP-005 additionally stores a project-to-Steward thread mapping, repairs missing
@@ -74,6 +80,9 @@ On 2026-08-12 the source dev host accepted the path install, reported the
 plugin and frontend bundle as compatible/running, exposed the heartbeat service
 and agent tool, and completed reload → disable → enable. A persisted observation
 survived a real plugin reload through the HTTP RPC boundary. Automated tests
-cover two-project denial, stale frontend responses, reconnect refetch, and
-host-driven service abort. Browser-only visual inspection and a full server
-restart remain manual follow-ups; neither blocks the plugin capability decision.
+cover two-project denial, stale frontend responses, reconnect refetch, settings
+changes, and host-driven service abort. Settings changes publish a dedicated
+context invalidation signal; the panel refetches the authoritative project
+through the existing WebSocket-backed realtime channel. Browser-only visual
+inspection and a full server restart remain manual follow-ups; neither blocks
+the plugin capability decision.

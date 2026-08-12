@@ -24,6 +24,41 @@ const projectScopedInputSchema = z
   })
   .strict();
 
+const projectContextProjectSchema = z
+  .object({ id: z.string().min(1), name: z.string().min(1) })
+  .strict();
+
+export const projectContextSchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      status: z.literal("ready"),
+      configuredProject: projectContextProjectSchema,
+      error: z.null(),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("unconfigured"),
+      configuredProject: z.null(),
+      error: z.string().nullable(),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("missing"),
+      configuredProject: z.null(),
+      error: z.string().min(1),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("error"),
+      configuredProject: z.null(),
+      error: z.string().min(1),
+    })
+    .strict(),
+]);
+
 export const tasksCapabilitySchema = z
   .object({
     status: z.enum(["available", "unavailable", "incompatible"]),
@@ -138,15 +173,42 @@ const threadResultSchema = z
 export const stewardStatusInputSchema = z
   .object({ projectId: z.string().min(1).nullable() })
   .strict();
-export const stewardStatusSchema = z
-  .object({
-    status: z.enum(["uninitialized", "ready", "missing"]),
-    threadId: z.string().min(1).nullable(),
-    error: z.string().nullable(),
-  })
-  .strict();
+export const stewardStatusSchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      status: z.literal("uninitialized"),
+      threadId: z.null(),
+      error: z.string().nullable(),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("ready"),
+      threadId: z.string().min(1),
+      error: z.null(),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("missing"),
+      threadId: z.string().min(1).nullable(),
+      error: z.string().min(1),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("error"),
+      threadId: z.string().min(1).nullable(),
+      error: z.string().min(1),
+    })
+    .strict(),
+]);
 
 export const controlPlaneSpikeRpcContract = defineRpcContract({
+  projectContext: {
+    input: z.object({}).strict(),
+    output: projectContextSchema,
+  },
   snapshot: {
     input: z.object({ projectId: z.string().min(1).nullable() }).strict(),
     output: spikeSnapshotSchema,
@@ -225,5 +287,6 @@ export const controlPlaneSpikeRpcContract = defineRpcContract({
   },
 });
 
+export type ProjectContext = z.infer<typeof projectContextSchema>;
 export type SpikeSnapshot = z.infer<typeof spikeSnapshotSchema>;
 export type TasksCapability = z.infer<typeof tasksCapabilitySchema>;
