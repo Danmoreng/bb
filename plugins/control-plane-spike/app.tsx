@@ -6,7 +6,7 @@ import {
   useRealtimeConnectionState,
   useRpc,
 } from "@bb/plugin-sdk/app";
-import type { SpikeSnapshot } from "./src/contract.js";
+import type { SpikeSnapshot, TasksCapability } from "./src/contract.js";
 import { controlPlaneSpikeRpcContract } from "./src/contract.js";
 
 function payloadProjectId(payload: unknown): string | null | undefined {
@@ -24,6 +24,8 @@ function ControlPlanePanel() {
   const connection = useRealtimeConnectionState();
   const previousConnection = useRef(connection);
   const [snapshot, setSnapshot] = useState<SpikeSnapshot | null>(null);
+  const [tasksCapability, setTasksCapability] =
+    useState<TasksCapability | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const requestGeneration = useRef(0);
@@ -37,6 +39,13 @@ function ControlPlanePanel() {
       const nextSnapshot = await rpc.call("snapshot", { projectId });
       if (requestGeneration.current !== generation) return;
       setSnapshot(nextSnapshot);
+      try {
+        const capability = await rpc.call("tasksCapability", {});
+        if (requestGeneration.current === generation)
+          setTasksCapability(capability);
+      } catch {
+        if (requestGeneration.current === generation) setTasksCapability(null);
+      }
     } catch (cause) {
       if (requestGeneration.current !== generation) return;
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -47,6 +56,7 @@ function ControlPlanePanel() {
 
   useEffect(() => {
     setSnapshot(null);
+    setTasksCapability(null);
     void load();
     return () => {
       requestGeneration.current += 1;
@@ -132,6 +142,22 @@ function ControlPlanePanel() {
         <dt className="text-muted-foreground">Revision</dt>
         <dd aria-label="Snapshot revision">{snapshot.revision}</dd>
       </dl>
+      <div>
+        <h2 className="font-medium">Tasks integration</h2>
+        {tasksCapability ? (
+          <p className="text-sm" role="status" aria-label="Tasks capability">
+            {tasksCapability.status}: {tasksCapability.reason}
+          </p>
+        ) : (
+          <p
+            className="text-sm text-muted-foreground"
+            role="status"
+            aria-label="Tasks capability"
+          >
+            Tasks capability unavailable or not yet checked.
+          </p>
+        )}
+      </div>
       <div>
         <h2 className="font-medium">Lifecycle events</h2>
         {snapshot.lifecycleEvents.length === 0 ? (

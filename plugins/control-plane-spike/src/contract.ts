@@ -24,6 +24,87 @@ const projectScopedInputSchema = z
   })
   .strict();
 
+export const tasksCapabilitySchema = z
+  .object({
+    status: z.enum(["available", "unavailable", "incompatible"]),
+    pluginId: z.literal("tasks"),
+    version: z.string().nullable(),
+    expectedMethods: z.array(z.string()),
+    verifiedMethods: z.array(z.string()),
+    reason: z.string(),
+  })
+  .strict();
+
+const tasksOperationErrorSchema = z
+  .object({
+    code: z.string(),
+    message: z.string(),
+  })
+  .strict();
+
+export const tasksListProjectsInputSchema = z
+  .object({
+    folderId: z.string().nullable().optional(),
+  })
+  .strict();
+const tasksStatusSchema = z.enum([
+  "backlog",
+  "todo",
+  "in_progress",
+  "in_review",
+  "done",
+  "canceled",
+]);
+const tasksPrioritySchema = z.enum(["urgent", "high", "medium", "low", "none"]);
+export const tasksCreateTaskInputSchema = z
+  .object({
+    tasksProjectId: z.string().min(1),
+    title: z.string().min(1),
+    description: z.string().optional(),
+    status: tasksStatusSchema.optional(),
+    priority: tasksPrioritySchema.optional(),
+    dueDate: z.string().nullable().optional(),
+  })
+  .strict();
+export const tasksUpdateTaskInputSchema = z
+  .object({
+    taskId: z.string().min(1),
+    title: z.string().min(1).optional(),
+    description: z.string().optional(),
+    status: tasksStatusSchema.optional(),
+    priority: tasksPrioritySchema.optional(),
+    dueDate: z.string().nullable().optional(),
+  })
+  .strict();
+export const tasksCreateCommentInputSchema = z
+  .object({
+    taskId: z.string().min(1),
+    body: z.string(),
+    notify: z.boolean(),
+  })
+  .strict();
+export const tasksDelegateInputSchema = z
+  .object({
+    taskId: z.string().min(1),
+    presetId: z.string().min(1),
+    extraInstructions: z.string().optional(),
+  })
+  .strict();
+export const tasksAttachThreadInputSchema = z
+  .object({
+    taskId: z.string().min(1),
+    threadId: z.string().startsWith("thr_"),
+  })
+  .strict();
+
+const tasksResultSchema = z
+  .object({
+    ok: z.boolean(),
+    error: tasksOperationErrorSchema.optional(),
+    data: z.unknown().optional(),
+  })
+  .strict();
+
 export const controlPlaneSpikeRpcContract = defineRpcContract({
   snapshot: {
     input: z.object({ projectId: z.string().min(1).nullable() }).strict(),
@@ -33,6 +114,35 @@ export const controlPlaneSpikeRpcContract = defineRpcContract({
     input: projectScopedInputSchema,
     output: spikeSnapshotSchema,
   },
+  tasksCapability: {
+    input: z.object({}).strict(),
+    output: tasksCapabilitySchema,
+  },
+  tasksListProjects: {
+    input: tasksListProjectsInputSchema,
+    output: tasksResultSchema,
+  },
+  tasksCreateTask: {
+    input: tasksCreateTaskInputSchema,
+    output: tasksResultSchema,
+  },
+  tasksUpdateTask: {
+    input: tasksUpdateTaskInputSchema,
+    output: tasksResultSchema,
+  },
+  tasksCreateComment: {
+    input: tasksCreateCommentInputSchema,
+    output: tasksResultSchema,
+  },
+  tasksDelegate: {
+    input: tasksDelegateInputSchema,
+    output: tasksResultSchema,
+  },
+  tasksAttachThread: {
+    input: tasksAttachThreadInputSchema,
+    output: tasksResultSchema,
+  },
 });
 
 export type SpikeSnapshot = z.infer<typeof spikeSnapshotSchema>;
+export type TasksCapability = z.infer<typeof tasksCapabilitySchema>;

@@ -5,6 +5,13 @@ import {
   recordObservationInputSchema,
   type SpikeSnapshot,
 } from "./src/contract.js";
+import {
+  createTasksAdapter,
+  createTasksRpcGateway,
+  tasksAdapterSchemas,
+  TasksDomainError,
+  type TasksScopeGuard,
+} from "./src/tasks-adapter.js";
 
 const TOOL_NAME = "cp_spike_record";
 const REALTIME_CHANNEL = "control-plane-spike-changed";
@@ -44,6 +51,95 @@ export default async function plugin(bb: BbPluginApi) {
   settings.onChange((next) => {
     configuredProjectId = next.configuredProject ?? null;
   });
+
+  const tasksGateway = createTasksRpcGateway(bb.sdk);
+  const projectListSchema = z
+    .object({ projects: z.array(tasksAdapterSchemas.project) })
+    .passthrough();
+  const taskOutputSchema = z
+    .object({ task: tasksAdapterSchemas.task.nullable() })
+    .passthrough();
+  const threadProjectSchema = z
+    .object({ projectId: z.string().min(1) })
+    .passthrough();
+  async function callTasksRpc<T>(
+    method: string,
+    input: unknown,
+    schema: z.ZodType<T>,
+  ): Promise<T> {
+    const result = await tasksGateway.callRpc({
+      pluginId: "tasks",
+      method,
+      input,
+      outputSchema: schema,
+    });
+    const parsed = schema.safeParse(result);
+    if (!parsed.success) {
+      throw new TasksDomainError({
+        code: "invalid_output",
+        message: `Invalid Tasks ${method} response`,
+      });
+    }
+    return parsed.data;
+  }
+  const taskScopeGuard: TasksScopeGuard = {
+    async authorizeTasksProject(input) {
+      if (!configuredProjectId) {
+        throw new TasksDomainError({
+          code: "scope_denied",
+          message: "No configured bb project",
+        });
+      }
+      const response = await callTasksRpc(
+        "listProjects",
+        {},
+        projectListSchema,
+      );
+      const project = response.projects.find(
+        (candidate) => candidate.id === input.projectId,
+      );
+      if (!project || project.linkedBbProjectId !== configuredProjectId) {
+        throw new TasksDomainError({
+          code: "scope_denied",
+          message: "Tasks project is outside the configured bb project",
+        });
+      }
+    },
+    async authorizeTask(input) {
+      const response = await callTasksRpc(
+        "getTask",
+        { taskId: input.taskId },
+        taskOutputSchema,
+      );
+      const task = response.task;
+      if (!task) {
+        throw new TasksDomainError({
+          code: "task_not_found",
+          message: "Tasks task was not found",
+        });
+      }
+      await this.authorizeTasksProject({ projectId: task.projectId });
+    },
+    async authorizeTaskThreadLink(input) {
+      await this.authorizeTask({ taskId: input.taskId });
+      if (!configuredProjectId) {
+        throw new TasksDomainError({
+          code: "scope_denied",
+          message: "No configured bb project",
+        });
+      }
+      const thread = threadProjectSchema.parse(
+        await bb.sdk.threads.get({ threadId: input.threadId }),
+      );
+      if (thread.projectId !== configuredProjectId) {
+        throw new TasksDomainError({
+          code: "scope_denied",
+          message: "Thread is outside the configured bb project",
+        });
+      }
+    },
+  };
+  const tasksAdapter = createTasksAdapter(tasksGateway, taskScopeGuard);
 
   const db = bb.storage.database();
   bb.storage.migrate(db, [
@@ -125,6 +221,29 @@ export default async function plugin(bb: BbPluginApi) {
     return snapshot(projectId);
   }
 
+  function taskError(error: unknown): { code: string; message: string } {
+    if (error instanceof TasksDomainError) {
+      return { code: error.code, message: error.message };
+    }
+    const structured = z
+      .object({ code: z.string(), message: z.string() })
+      .safeParse(error);
+    if (structured.success) return structured.data;
+    return {
+      code: "tasks_operation_failed",
+      message:
+        error instanceof Error ? error.message : "Tasks operation failed",
+    };
+  }
+
+  async function taskOperation<T>(operation: () => Promise<T>) {
+    try {
+      return { ok: true as const, data: await operation() };
+    } catch (error) {
+      return { ok: false as const, error: taskError(error) };
+    }
+  }
+
   bb.rpc.register(controlPlaneSpikeRpcContract, {
     snapshot({ projectId }) {
       return snapshot(projectId);
@@ -132,6 +251,34 @@ export default async function plugin(bb: BbPluginApi) {
     recordObservation({ projectId, message }) {
       return record(projectId, message);
     },
+    tasksCapability: async () => {
+      const capability = await tasksAdapter.probe();
+      return {
+        ...capability,
+        expectedMethods: [...capability.expectedMethods],
+        verifiedMethods: [...capability.verifiedMethods],
+      };
+    },
+    tasksListProjects: (input) =>
+      taskOperation(() => tasksAdapter.listProjects(input)),
+    tasksCreateTask: (input) =>
+      taskOperation(() =>
+        tasksAdapter.createTask({
+          projectId: input.tasksProjectId,
+          title: input.title,
+          description: input.description,
+          status: input.status,
+          priority: input.priority,
+          dueDate: input.dueDate,
+        }),
+      ),
+    tasksUpdateTask: (input) =>
+      taskOperation(() => tasksAdapter.updateTask(input)),
+    tasksCreateComment: (input) =>
+      taskOperation(() => tasksAdapter.createComment(input)),
+    tasksDelegate: (input) => taskOperation(() => tasksAdapter.delegate(input)),
+    tasksAttachThread: (input) =>
+      taskOperation(() => tasksAdapter.attachThread(input)),
   });
 
   bb.agents.registerTool({
