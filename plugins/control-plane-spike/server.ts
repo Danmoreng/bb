@@ -1,0 +1,210 @@
+import type { BbPluginApi } from "@bb/plugin-sdk";
+import { z } from "zod";
+import {
+  controlPlaneSpikeRpcContract,
+  recordObservationInputSchema,
+  type SpikeSnapshot,
+} from "./src/contract.js";
+
+const TOOL_NAME = "cp_spike_record";
+const REALTIME_CHANNEL = "control-plane-spike-changed";
+const MAX_EVENTS = 50;
+const lifecycleEventRowSchema = z.object({ event_name: z.string() });
+const countRowSchema = z.object({ count: z.number() });
+
+function waitForAbort(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const finish = () => {
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    signal.addEventListener("abort", finish, { once: true });
+  });
+}
+
+function publishChanged(
+  bb: BbPluginApi,
+  projectId: string | null,
+  revision: number,
+) {
+  bb.realtime.publish(REALTIME_CHANNEL, { projectId, revision });
+}
+
+export default async function plugin(bb: BbPluginApi) {
+  const settings = bb.settings.define({
+    configuredProject: {
+      type: "project",
+      label: "Capability spike project",
+      description: "The only project where the spike agent tool is enabled.",
+    },
+  });
+  const configured = await settings.get();
+  let configuredProjectId = configured.configuredProject ?? null;
+  settings.onChange((next) => {
+    configuredProjectId = next.configuredProject ?? null;
+  });
+
+  const db = bb.storage.database();
+  bb.storage.migrate(db, [
+    `CREATE TABLE IF NOT EXISTS spike_observations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id TEXT NOT NULL,
+      message TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS spike_observations_project_created
+      ON spike_observations (project_id, created_at DESC)`,
+    `CREATE TABLE IF NOT EXISTS spike_lifecycle_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      event_name TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )`,
+  ]);
+
+  let revision = 0;
+  function unauthorizedSnapshot(
+    projectId: string,
+    reason: string,
+  ): SpikeSnapshot {
+    return {
+      projectId: null,
+      observationCount: 0,
+      lifecycleEvents: [],
+      revision,
+      error: `Project ${projectId} is not configured for this capability spike: ${reason}`,
+    };
+  }
+
+  function snapshot(projectId: string | null): SpikeSnapshot {
+    if (!projectId) {
+      return {
+        projectId: null,
+        observationCount: 0,
+        lifecycleEvents: [],
+        revision,
+        error: "Select a project before inspecting the capability spike.",
+      };
+    }
+    if (projectId !== configuredProjectId) {
+      return unauthorizedSnapshot(projectId, "read access denied");
+    }
+    const count = countRowSchema.parse(
+      db
+        .prepare(
+          "SELECT COUNT(*) AS count FROM spike_observations WHERE project_id = ?",
+        )
+        .get(projectId),
+    ).count;
+    const events = db
+      .prepare(
+        "SELECT event_name FROM spike_lifecycle_events WHERE project_id = ? ORDER BY id DESC LIMIT ?",
+      )
+      .all(projectId, MAX_EVENTS)
+      .map((row) => lifecycleEventRowSchema.parse(row).event_name);
+    return {
+      projectId,
+      observationCount: count,
+      lifecycleEvents: events,
+      revision,
+      error: null,
+    };
+  }
+
+  function record(projectId: string, message: string): SpikeSnapshot {
+    if (projectId !== configuredProjectId) {
+      return unauthorizedSnapshot(projectId, "write access denied");
+    }
+    db.prepare(
+      "INSERT INTO spike_observations (project_id, message, created_at) VALUES (?, ?, ?)",
+    ).run(projectId, message, Date.now());
+    revision += 1;
+    publishChanged(bb, projectId, revision);
+    return snapshot(projectId);
+  }
+
+  bb.rpc.register(controlPlaneSpikeRpcContract, {
+    snapshot({ projectId }) {
+      return snapshot(projectId);
+    },
+    recordObservation({ projectId, message }) {
+      return record(projectId, message);
+    },
+  });
+
+  bb.agents.registerTool({
+    name: TOOL_NAME,
+    description:
+      "Record a short capability-spike observation for the current project.",
+    instructions:
+      "Use this only for a concise observation about the Control Plane capability spike.",
+    parameters: recordObservationInputSchema,
+    execute({ message }, context) {
+      if (context.projectId !== configuredProjectId) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "This spike tool is not configured for the current project.",
+            },
+          ],
+          isError: true,
+        };
+      }
+      const result = record(context.projectId, message);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Recorded observation ${result.observationCount}.`,
+          },
+        ],
+      };
+    },
+  });
+
+  bb.agents.configure((context) => ({
+    tools: context.project.id === configuredProjectId ? [TOOL_NAME] : [],
+    skills: [],
+  }));
+
+  bb.agents.contributeInstructions((context) =>
+    context.projectId === configuredProjectId
+      ? "Control Plane capability spike is enabled for this project. Keep observations concise and explicitly label uncertainty."
+      : null,
+  );
+
+  const lifecycleNames = [
+    "thread.created",
+    "thread.active",
+    "thread.idle",
+    "thread.failed",
+    "thread.archived",
+    "thread.deleted",
+  ] as const;
+  for (const eventName of lifecycleNames) {
+    bb.events.on(eventName, ({ thread }) => {
+      const projectId = thread.projectId;
+      if (projectId !== configuredProjectId) return;
+      db.prepare(
+        "INSERT INTO spike_lifecycle_events (project_id, thread_id, event_name, created_at) VALUES (?, ?, ?, ?)",
+      ).run(projectId, thread.id, eventName, Date.now());
+      revision += 1;
+      publishChanged(bb, projectId, revision);
+    });
+  }
+
+  bb.background.service("control-plane-spike-heartbeat", {
+    async start(signal) {
+      await waitForAbort(signal);
+    },
+  });
+
+  bb.onDispose(() => {
+    // The host owns the database handle. This hook is intentionally present to
+    // prove plugin-owned resources are disposed without closing host storage.
+    revision = 0;
+  });
+}
