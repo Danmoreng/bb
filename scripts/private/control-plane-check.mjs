@@ -11,7 +11,7 @@ function filesUnder(directory) {
   const result = [];
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);
-    if (entry.name === "node_modules" || entry.name === "dist" || entry.name === ".turbo") continue;
+    if (entry.name === "node_modules" || entry.name === "dist" || entry.name === ".turbo" || entry.name === "types" || entry.name === "test") continue;
     if (entry.isDirectory()) result.push(...filesUnder(path));
     else if (/\.(?:ts|tsx|js|mjs|cjs)$/u.test(entry.name)) result.push(path);
   }
