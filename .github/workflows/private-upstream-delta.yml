@@ -1,0 +1,89 @@
+name: Private Upstream Delta
+
+on:
+  push:
+    branches:
+      - personal
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-upstream-delta-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  report:
+    name: Report private upstream delta
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+
+      - name: Fetch canonical upstream reference
+        run: git fetch --no-tags --force https://github.com/get-bb/bb.git main:refs/remotes/upstream/main
+
+      - name: Generate read-only delta report
+        run: >-
+          node scripts/private/report-upstream-delta.mjs
+          --upstream-ref upstream/main
+          --require-upstream
+          --output "$RUNNER_TEMP/bb-upstream-delta.json"
+
+      - name: Check whitespace against merge base
+        run: >-
+          git diff --check
+          "$(git merge-base HEAD upstream/main)" HEAD
+
+      - name: Add compact report summary
+        if: always()
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync, readFileSync } from "node:fs";
+          const path = `${process.env.RUNNER_TEMP}/bb-upstream-delta.json`;
+          const report = JSON.parse(readFileSync(path, "utf8"));
+          const safe = (value) => String(value ?? "n/a").replace(/[\\`\n\r|]/g, " ");
+          const privateCount = report.changes?.privateSinceMergeBase?.length ?? 0;
+          const upstreamCount = report.changes?.upstreamSinceMergeBase?.length ?? 0;
+          const conflicts = report.conflictCandidates?.length
+            ? report.conflictCandidates.map(safe).join(", ")
+            : "none";
+          const lines = [
+            "## Private upstream delta",
+            "",
+            "| Field | Value |",
+            "| --- | --- |",
+            `| Status | ${safe(report.status)} |`,
+            `| HEAD | ${safe(report.repository?.head)} |`,
+            `| Upstream | ${safe(report.repository?.upstreamSha)} |`,
+            `| Merge-base | ${safe(report.repository?.mergeBase)} |`,
+            `| Private files | ${privateCount} |`,
+            `| Upstream files | ${upstreamCount} |`,
+            `| Conflict candidates | ${conflicts} |`,
+            "",
+            "The full JSON report is available in the workflow artifact.",
+          ];
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${lines.join("\n")}\n`);
+          NODE
+
+      - name: Upload delta report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-upstream-delta
+          path: ${{ runner.temp }}/bb-upstream-delta.json
+          if-no-files-found: error

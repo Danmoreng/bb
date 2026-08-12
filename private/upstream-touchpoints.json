@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "categories": ["core", "plugin", "ui", "build", "generated", "docs", "lockfile", "metadata"],
+  "manifestSemantics": {
+    "kind": "audited-snapshot",
+    "annotationRequired": ["path", "category", "purpose", "owner", "conflictRisk"],
+    "updatedBy": "deliberate human-reviewed baseline change"
+  },
+  "baseline": {
+    "branch": "personal",
+    "head": "13f458b1f8716c6226147ce2da97e84f101f0d4c",
+    "upstreamRef": "upstream/main",
+    "upstreamSha": "d07c1ce289e73b96c13cc76d483c359dd7c279f2",
+    "mergeBase": "d07c1ce289e73b96c13cc76d483c359dd7c279f2",
+    "privateCommit": "13f458b1f8716c6226147ce2da97e84f101f0d4c"
+  },
+  "touchpoints": [
+    {
+      "path": "apps/app/src/components/promptbox/PromptBoxAppShortcuts.test.tsx",
+      "category": "ui",
+      "purpose": "Tests the voice.toggle application shortcut and promptbox interaction.",
+      "owner": "app/promptbox",
+      "conflictRisk": "medium"
+    },
+    {
+      "path": "apps/app/src/components/promptbox/PromptBoxInternal.tsx",
+      "category": "ui",
+      "purpose": "Handles the voice.toggle command in the promptbox shortcut flow.",
+      "owner": "app/promptbox",
+      "conflictRisk": "medium"
+    },
+    {
+      "path": "apps/app/src/lib/app-command-metadata.ts",
+      "category": "ui",
+      "purpose": "Registers metadata for the voice.toggle application command.",
+      "owner": "app/commands",
+      "conflictRisk": "low"
+    },
+    {
+      "path": "apps/server/src/services/system/app-keybindings.ts",
+      "category": "core",
+      "purpose": "Adds the voice.toggle command to server-side application keybinding definitions.",
+      "owner": "server/system",
+      "conflictRisk": "low"
+    },
+    {
+      "path": "apps/server/test/system/app-keybindings.test.ts",
+      "category": "core",
+      "purpose": "Verifies the server-side voice.toggle keybinding definition.",
+      "owner": "server/system",
+      "conflictRisk": "low"
+    },
+    {
+      "path": "docs/configuration.md",
+      "category": "docs",
+      "purpose": "Documents the voice input configuration exposed by the shortcut.",
+      "owner": "docs/configuration",
+      "conflictRisk": "low"
+    },
+    {
+      "path": "packages/domain/src/app-keybindings.ts",
+      "category": "core",
+      "purpose": "Adds the shared domain command identifier for voice.toggle.",
+      "owner": "domain/app-keybindings",
+      "conflictRisk": "low"
+    },
+    {
+      "path": "packages/plugin-sdk/bundled-types/bb-plugin-sdk.d.ts",
+      "category": "generated",
+      "purpose": "Updates generated bundled plugin SDK declarations affected by the private change.",
+      "owner": "plugin-sdk/generated",
+      "conflictRisk": "high"
+    },
+    {
+      "path": "packages/templates/src/generated/plugin-sdk-dts.generated.ts",
+      "category": "generated",
+      "purpose": "Updates generated plugin scaffold declarations affected by the private change.",
+      "owner": "templates/generated",
+      "conflictRisk": "high"
+    }
+  ]
+}
