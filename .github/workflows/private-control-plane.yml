@@ -1,0 +1,43 @@
+name: Private Control Plane
+
+on:
+  push:
+    branches:
+      - personal
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-control-plane-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  foundation:
+    name: Control Plane foundation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup workspace
+        uses: ./.github/actions/setup-workspace
+        with:
+          node-version: "22.x"
+          pnpm-version: "9.15.0"
+          cache-prefix: private-control-plane
+
+      - name: Architecture guard
+        run: node scripts/private/control-plane-check.mjs
+
+      - name: Spike checks
+        run: pnpm exec turbo run typecheck test build --filter=bb-plugin-control-plane-spike --output-logs=new-only
+
+      - name: Whitespace check
+        run: git diff --check
