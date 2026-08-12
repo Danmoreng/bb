@@ -4,20 +4,33 @@
   "private": true,
   "type": "module",
   "description": "Human control plane for coordinating agent software teams.",
-  "engines": { "bb": ">=0.0", "bbPluginSdk": "^0.4.1" },
+  "engines": {
+    "bb": ">=0.0",
+    "bbPluginSdk": "^0.4.1"
+  },
   "bb": {
     "name": "Control Plane",
     "description": "Coordinate agent work, decisions, runs, and human attention.",
-    "branding": { "icon": "Workflow" },
+    "branding": {
+      "icon": "Workflow"
+    },
     "server": "./server.ts",
     "app": "./app.tsx",
-    "skills": ["skills"]
+    "skills": [
+      "skills"
+    ]
   },
-  "files": ["dist", "server.ts", "app.tsx", "skills", "README.md"],
+  "files": [
+    "dist",
+    "server.ts",
+    "app.tsx",
+    "skills",
+    "README.md"
+  ],
   "scripts": {
     "build": "pnpm exec turbo run build --filter=@bb/cli && node ../../apps/cli/dist/index.js plugin build .",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --config vitest.config.ts"
+    "test": "pnpm exec turbo run build --filter=@bb-private/control-plane-domain && vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "@bb-private/control-plane-domain": "workspace:*",
