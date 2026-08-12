@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createFakePluginHost } from "@bb/plugin-sdk/testing";
 import type { FakeSdkOverrides } from "@bb/plugin-sdk/testing";
+import type { BbPluginApi } from "@bb/plugin-sdk";
 import plugin from "./server.js";
 
 const project = {
@@ -320,6 +321,93 @@ describe("control-plane capability spike", () => {
     expect(calls.filter((call) => call.method === "createTask")).toHaveLength(
       1,
     );
+  });
+
+  it("exposes project-scoped thread spawn and delivery RPCs through the SDK", async () => {
+    const sdk = {
+      threads: {
+        spawn: async (
+          input: Parameters<BbPluginApi["sdk"]["threads"]["spawn"]>[0],
+        ) => ({
+          id: input.parentThreadId ? "thr_child" : "thr_root",
+          projectId: input.projectId,
+          parentThreadId: input.parentThreadId ?? null,
+          originPluginId: "control-plane-spike",
+          status: "idle",
+          providerThreadId: "provider-thread",
+          updatedAt: "2026-08-12T00:00:00.000Z",
+        }),
+        get: async () => ({
+          projectId: "proj_personal",
+          id: "thr_root",
+          parentThreadId: null,
+          status: "idle",
+          providerThreadId: null,
+          updatedAt: null,
+        }),
+        send: async () => ({ ok: true }),
+        stop: async () => ({ ok: true }),
+        queuedMessages: {
+          create: async () => ({
+            id: "queued-1",
+            content: [{ type: "text", text: "checkpoint", mentions: [] }],
+            updatedAt: 1,
+          }),
+          list: async () => [],
+          update: async () => ({
+            id: "queued-1",
+            content: [{ type: "text", text: "updated", mentions: [] }],
+            updatedAt: 2,
+          }),
+          delete: async () => ({ ok: true }),
+          reorder: async () => [],
+          send: async () => ({
+            ok: true,
+            queuedMessage: {
+              id: "queued-1",
+              content: [{ type: "text", text: "checkpoint", mentions: [] }],
+              updatedAt: 1,
+            },
+          }),
+        },
+      },
+    };
+    const host = await load({ configuredProject: "proj_personal" }, sdk);
+    await expect(
+      host.harness.callRpc("threadSpawnRoot", {
+        projectId: "proj_personal",
+        prompt: "root",
+        environment: { type: "project-default" },
+      }),
+    ).resolves.toMatchObject({ ok: true, data: { threadId: "thr_root" } });
+    await expect(
+      host.harness.callRpc("threadSendNow", {
+        threadId: "thr_root",
+        prompt: "nudge",
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      data: { acceptance: "accepted", application: "unknown" },
+    });
+    await expect(
+      host.harness.callRpc("threadCheckpoint", {
+        threadId: "thr_root",
+        prompt: "next checkpoint",
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      data: { acceptance: "accepted", application: "queued" },
+    });
+    await expect(
+      host.harness.callRpc("threadStop", { threadId: "thr_root" }),
+    ).resolves.toMatchObject({ ok: true, data: { acceptance: "accepted" } });
+    await expect(
+      host.harness.callRpc("threadSpawnRoot", {
+        projectId: "other-project",
+        prompt: "denied",
+        environment: { type: "project-default" },
+      }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "scope_denied" } });
   });
 
   it("stops its abort-sensitive background service on dispose", async () => {

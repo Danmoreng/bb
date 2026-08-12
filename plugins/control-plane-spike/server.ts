@@ -12,6 +12,11 @@ import {
   TasksDomainError,
   type TasksScopeGuard,
 } from "./src/tasks-adapter.js";
+import {
+  createThreadSdkGateway,
+  SdkThreadHost,
+  type GatewaySpawnInput,
+} from "./src/thread-adapter.js";
 
 const TOOL_NAME = "cp_spike_record";
 const REALTIME_CHANNEL = "control-plane-spike-changed";
@@ -158,7 +163,91 @@ export default async function plugin(bb: BbPluginApi) {
       event_name TEXT NOT NULL,
       created_at INTEGER NOT NULL
     )`,
+    `CREATE TABLE IF NOT EXISTS spike_thread_receipts (
+      receipt_id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      intent TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS spike_thread_refs (
+      thread_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      parent_thread_id TEXT,
+      created_at INTEGER NOT NULL
+    )`,
   ]);
+
+  let receiptSequence = 0;
+  const threadSdk = {
+    threads: {
+      spawn: (input: GatewaySpawnInput) =>
+        bb.sdk.threads.spawn({
+          projectId: input.projectId,
+          input: input.input,
+          environment: input.environment,
+          ...(input.title ? { title: input.title } : {}),
+          ...(input.parentThreadId
+            ? { parentThreadId: input.parentThreadId }
+            : {}),
+          origin: input.origin,
+          originPluginId: input.originPluginId,
+        }),
+      get: (input: { threadId: string; signal?: AbortSignal }) =>
+        bb.sdk.threads.get(input),
+      wait: (input: Parameters<typeof bb.sdk.threads.wait>[0]) =>
+        bb.sdk.threads.wait(input),
+      events: {
+        list: (input: Parameters<typeof bb.sdk.threads.events.list>[0]) =>
+          bb.sdk.threads.events.list(input),
+      },
+      timeline: (input: Parameters<typeof bb.sdk.threads.timeline>[0]) =>
+        bb.sdk.threads.timeline(input),
+      output: (input: Parameters<typeof bb.sdk.threads.output>[0]) =>
+        bb.sdk.threads.output(input),
+      interactions: {
+        list: (input: Parameters<typeof bb.sdk.threads.interactions.list>[0]) =>
+          bb.sdk.threads.interactions.list(input),
+      },
+      send: (input: Parameters<typeof bb.sdk.threads.send>[0]) =>
+        bb.sdk.threads.send(input),
+      queuedMessages: {
+        create: (
+          input: Parameters<typeof bb.sdk.threads.queuedMessages.create>[0],
+        ) => bb.sdk.threads.queuedMessages.create(input),
+        list: (
+          input: Parameters<typeof bb.sdk.threads.queuedMessages.list>[0],
+        ) => bb.sdk.threads.queuedMessages.list(input),
+        update: (
+          input: Parameters<typeof bb.sdk.threads.queuedMessages.update>[0],
+        ) => bb.sdk.threads.queuedMessages.update(input),
+        delete: (
+          input: Parameters<typeof bb.sdk.threads.queuedMessages.delete>[0],
+        ) => bb.sdk.threads.queuedMessages.delete(input),
+        reorder: (
+          input: Parameters<typeof bb.sdk.threads.queuedMessages.reorder>[0],
+        ) => bb.sdk.threads.queuedMessages.reorder(input),
+        send: (
+          input: Parameters<typeof bb.sdk.threads.queuedMessages.send>[0],
+        ) => bb.sdk.threads.queuedMessages.send(input),
+      },
+      stop: (input: Parameters<typeof bb.sdk.threads.stop>[0]) =>
+        bb.sdk.threads.stop(input),
+    },
+  };
+  const threadHost = new SdkThreadHost({
+    gateway: createThreadSdkGateway(threadSdk),
+    pluginId: "control-plane-spike",
+    receiptIds: {
+      nextId({ threadId, intent }) {
+        receiptSequence += 1;
+        const receiptId = `spike-receipt-${receiptSequence}`;
+        db.prepare(
+          "INSERT INTO spike_thread_receipts (receipt_id, thread_id, intent, created_at) VALUES (?, ?, ?, ?)",
+        ).run(receiptId, threadId, intent, Date.now());
+        return receiptId;
+      },
+    },
+  });
 
   let revision = 0;
   function unauthorizedSnapshot(
@@ -244,6 +333,16 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  async function threadOperation<T>(operation: () => Promise<T>) {
+    if (!configuredProjectId) {
+      return {
+        ok: false as const,
+        error: { code: "scope_denied", message: "No configured bb project" },
+      };
+    }
+    return taskOperation(operation);
+  }
+
   bb.rpc.register(controlPlaneSpikeRpcContract, {
     snapshot({ projectId }) {
       return snapshot(projectId);
@@ -279,6 +378,53 @@ export default async function plugin(bb: BbPluginApi) {
     tasksDelegate: (input) => taskOperation(() => tasksAdapter.delegate(input)),
     tasksAttachThread: (input) =>
       taskOperation(() => tasksAdapter.attachThread(input)),
+    threadSpawnRoot: (input) =>
+      threadOperation(async () => {
+        if (input.projectId !== configuredProjectId) {
+          throw new TasksDomainError({
+            code: "scope_denied",
+            message: "Thread project is outside the configured bb project",
+          });
+        }
+        const receipt = await threadHost.spawnRoot(input);
+        db.prepare(
+          "INSERT OR REPLACE INTO spike_thread_refs (thread_id, project_id, parent_thread_id, created_at) VALUES (?, ?, ?, ?)",
+        ).run(
+          receipt.threadId,
+          receipt.projectId,
+          receipt.parentThreadId,
+          Date.now(),
+        );
+        return receipt;
+      }),
+    threadSpawnChild: (input) =>
+      threadOperation(async () => {
+        if (input.projectId !== configuredProjectId) {
+          throw new TasksDomainError({
+            code: "scope_denied",
+            message: "Thread project is outside the configured bb project",
+          });
+        }
+        const receipt = await threadHost.spawnChild(input);
+        db.prepare(
+          "INSERT OR REPLACE INTO spike_thread_refs (thread_id, project_id, parent_thread_id, created_at) VALUES (?, ?, ?, ?)",
+        ).run(
+          receipt.threadId,
+          receipt.projectId,
+          receipt.parentThreadId,
+          Date.now(),
+        );
+        return receipt;
+      }),
+    threadGet: (input) => threadOperation(() => threadHost.get(input)),
+    threadSendNow: (input) => threadOperation(() => threadHost.sendNow(input)),
+    threadSendNextTurn: (input) =>
+      threadOperation(() => threadHost.sendNextTurn(input)),
+    threadCheckpoint: (input) =>
+      threadOperation(() => threadHost.queueCheckpointInput(input)),
+    threadQueueList: (input) =>
+      threadOperation(() => threadHost.queue.list(input)),
+    threadStop: (input) => threadOperation(() => threadHost.stop(input)),
   });
 
   bb.agents.registerTool({

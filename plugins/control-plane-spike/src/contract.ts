@@ -105,6 +105,37 @@ const tasksResultSchema = z
   })
   .strict();
 
+const threadEnvironmentSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("project-default") }).strict(),
+  z
+    .object({ type: z.literal("reuse"), environmentId: z.string().min(1) })
+    .strict(),
+]);
+export const threadSpawnRootInputSchema = z
+  .object({
+    projectId: z.string().min(1),
+    prompt: z.string().min(1),
+    environment: threadEnvironmentSchema,
+    title: z.string().min(1).optional(),
+  })
+  .strict();
+export const threadSpawnChildInputSchema = threadSpawnRootInputSchema.extend({
+  parentThreadId: z.string().min(1),
+});
+export const threadRefInputSchema = z
+  .object({ threadId: z.string().min(1) })
+  .strict();
+export const threadPromptInputSchema = threadRefInputSchema.extend({
+  prompt: z.string().min(1),
+});
+const threadResultSchema = z
+  .object({
+    ok: z.boolean(),
+    error: tasksOperationErrorSchema.optional(),
+    data: z.unknown().optional(),
+  })
+  .strict();
+
 export const controlPlaneSpikeRpcContract = defineRpcContract({
   snapshot: {
     input: z.object({ projectId: z.string().min(1).nullable() }).strict(),
@@ -141,6 +172,38 @@ export const controlPlaneSpikeRpcContract = defineRpcContract({
   tasksAttachThread: {
     input: tasksAttachThreadInputSchema,
     output: tasksResultSchema,
+  },
+  threadSpawnRoot: {
+    input: threadSpawnRootInputSchema,
+    output: threadResultSchema,
+  },
+  threadSpawnChild: {
+    input: threadSpawnChildInputSchema,
+    output: threadResultSchema,
+  },
+  threadGet: {
+    input: threadRefInputSchema,
+    output: threadResultSchema,
+  },
+  threadSendNow: {
+    input: threadPromptInputSchema,
+    output: threadResultSchema,
+  },
+  threadSendNextTurn: {
+    input: threadPromptInputSchema,
+    output: threadResultSchema,
+  },
+  threadCheckpoint: {
+    input: threadPromptInputSchema,
+    output: threadResultSchema,
+  },
+  threadQueueList: {
+    input: threadRefInputSchema,
+    output: threadResultSchema,
+  },
+  threadStop: {
+    input: threadRefInputSchema,
+    output: threadResultSchema,
   },
 });
 
