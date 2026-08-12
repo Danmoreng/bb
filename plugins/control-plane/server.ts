@@ -1,10 +1,12 @@
 import type { BbPluginApi } from "@bb/plugin-sdk";
 import { controlPlaneRpcContract } from "./src/contract.js";
+import { initializeControlPlaneDatabase } from "./src/db/migrations.js";
 
 const PLUGIN_VERSION = "0.0.1";
 const DOMAIN_PACKAGE_VERSION = "0.0.1";
 
 export default async function plugin(bb: BbPluginApi) {
+  initializeControlPlaneDatabase(bb.storage.database(), bb.storage.migrate);
   bb.rpc.register(controlPlaneRpcContract, {
     ping: () => ({ ok: true as const, version: PLUGIN_VERSION }),
     diagnostics: ({ projectId }) => ({
